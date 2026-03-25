@@ -10,6 +10,8 @@ Or from the repo root:
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -23,6 +25,8 @@ from sim.state import SimConfig
 
 from .routes import games, ws
 from .store import GameStore
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Lifespan
@@ -42,8 +46,35 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await store.startup()
     app.state.store = store
 
+    # Start agent runner if AGENT_GAME_ID and AGENT_ROLE are set.
+    # The game must already exist in the DB (restored at startup) or be created before
+    # the runner's first decision window fires.
+    agent_task: asyncio.Task[None] | None = None
+    agent_game_id = os.environ.get("AGENT_GAME_ID", "").strip()
+    agent_role = os.environ.get("AGENT_ROLE", "").strip()
+    if agent_game_id and agent_role:
+        from agents.agent import AgentService
+        from agents.llm import get_llm_client
+        from agents.runner import AgentRunner
+
+        llm_client = get_llm_client(agent_role)
+        agent_service = AgentService(role=agent_role, llm_client=llm_client)
+        runner = AgentRunner(
+            game_id=agent_game_id,
+            role=agent_role,
+            agent_service=agent_service,
+            store=store,
+        )
+        agent_task = asyncio.create_task(runner.run())
+        log.info(
+            "Agent runner started: game=%s role=%s provider=%s model=%s",
+            agent_game_id, agent_role, llm_client.provider, llm_client.model,
+        )
+
     yield
 
+    if agent_task is not None:
+        agent_task.cancel()
     await store.shutdown()
 
 
@@ -58,9 +89,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_cors_raw = os.environ.get("CORS_ORIGINS", "*")
+_cors_origins = [o.strip() for o in _cors_raw.split(",")]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )

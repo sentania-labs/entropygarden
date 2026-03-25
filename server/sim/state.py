@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -95,6 +96,36 @@ class EventRecord(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Actions & modifiers
+# ---------------------------------------------------------------------------
+
+
+class ActionType(str, Enum):
+    PRIORITIZE_MAINTENANCE = "prioritize_maintenance"  # redirect engineer effort to one ring
+    EMERGENCY_REPAIR = "emergency_repair"              # one-shot: -0.05 debt, costs 5 power
+    DIVERT_POWER = "divert_power"                      # transfer power between rings
+    RATION_RESOURCE = "ration_resource"                # -20% consumption for 30 ticks
+    BOOST_PRODUCTION = "boost_production"              # +20% production for 30 ticks
+
+
+class PendingAction(BaseModel):
+    action_id: str
+    role: str
+    action_type: ActionType
+    ring_id: str
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    submitted_tick: int
+
+
+class ActiveModifier(BaseModel):
+    modifier_id: str
+    action_type: ActionType
+    ring_id: str
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    expires_tick: int
+
+
+# ---------------------------------------------------------------------------
 # Top-level game state
 # ---------------------------------------------------------------------------
 
@@ -106,6 +137,9 @@ class GameState(BaseModel):
     rings: dict[str, RingState]     # keyed by ring_id: "ring_1" | "ring_2" | "ring_3"
     event_log: list[EventRecord] = Field(default_factory=list)
     event_cooldowns: dict[str, int] = Field(default_factory=dict)  # "{event_id}:{ring_id}" -> last tick fired
+    pending_actions: list[PendingAction] = Field(default_factory=list)
+    active_modifiers: list[ActiveModifier] = Field(default_factory=list)
+    decision_window_interval: int = 100  # ticks between decision windows
 
     @property
     def year(self) -> float:

@@ -255,6 +255,32 @@ class TestDeleteGame:
 # ---------------------------------------------------------------------------
 
 
+class TestHistory:
+    def test_history_empty_before_ticks(self, client: TestClient) -> None:
+        game_id = _create_game(client)
+        resp = client.get(f"/games/{game_id}/history")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    def test_history_populated_after_advance(self, client: TestClient) -> None:
+        game_id = _create_game(client)
+        client.post(f"/games/{game_id}/advance", json={"ticks": 10})
+        resp = client.get(f"/games/{game_id}/history")
+        assert resp.status_code == 200
+        pts = resp.json()
+        assert len(pts) == 1  # tick 10 is divisible by 10
+        pt = pts[0]
+        assert pt["tick"] == 10
+        assert "rings" in pt
+        for ring in pt["rings"].values():
+            assert "food" in ring
+            assert "population" in ring
+
+    def test_history_unknown_game_404(self, client: TestClient) -> None:
+        resp = client.get("/games/nonexistent/history")
+        assert resp.status_code == 404
+
+
 class TestWebSocket:
     def test_ws_receives_initial_state(self, client: TestClient) -> None:
         game_id = _create_game(client)

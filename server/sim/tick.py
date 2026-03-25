@@ -28,7 +28,16 @@ from sim.population import age_person, apply_medic_heal, apply_starvation, is_de
 from sim.pressures import accumulate_pressures
 from sim.prng import tick_rng
 from sim.resources import consumption_for_ring, production_for_ring
-from sim.state import GameState, Occupation, Person, ResourcePool, RingState, SimConfig
+from sim.state import (
+    ActionType,
+    ActiveModifier,
+    GameState,
+    Occupation,
+    Person,
+    ResourcePool,
+    RingState,
+    SimConfig,
+)
 
 
 def tick(
@@ -40,12 +49,16 @@ def tick(
     if cfg is None:
         cfg = SimConfig()
 
+    # 0. Apply pending actions (one-shot effects + create modifiers), expire old modifiers
+    state = _apply_pending_actions(state, cfg)
+
     new_rings: dict[str, RingState] = {}
     new_person_counter = state.tick  # use tick as part of unique ID for new births
 
     for ring_id, ring in state.rings.items():
+        ring_mods = [m for m in state.active_modifiers if m.ring_id == ring_id]
         ring, new_person_counter = _tick_ring(
-            ring, state.seed, state.tick, cfg, new_person_counter
+            ring, state.seed, state.tick, cfg, new_person_counter, ring_mods
         )
         new_rings[ring_id] = ring
 
@@ -58,15 +71,100 @@ def tick(
     return mid_state
 
 
+def _apply_pending_actions(state: GameState, cfg: SimConfig) -> GameState:
+    """Apply pending actions: one-shot effects immediately, multi-tick effects as ActiveModifiers."""
+    if not state.pending_actions:
+        # Still expire old modifiers
+        kept = [m for m in state.active_modifiers if m.expires_tick > state.tick]
+        if len(kept) == len(state.active_modifiers):
+            return state
+        return state.model_copy(update={"active_modifiers": kept})
+
+    rings = dict(state.rings)
+    new_modifiers: list[ActiveModifier] = []
+
+    for action in state.pending_actions:
+        ring = rings.get(action.ring_id)
+        if ring is None:
+            continue
+
+        if action.action_type == ActionType.EMERGENCY_REPAIR:
+            p = ring.pressures
+            r = ring.resources
+            rings[action.ring_id] = ring.model_copy(update={
+                "pressures": p.model_copy(update={
+                    "maintenance_debt": max(0.0, p.maintenance_debt - 0.05),
+                }),
+                "resources": r.model_copy(update={
+                    "power": max(0.0, r.power - 5.0),
+                }),
+            })
+
+        elif action.action_type == ActionType.DIVERT_POWER:
+            target_id = str(action.parameters.get("target_ring", ""))
+            amount = float(action.parameters.get("amount", 10.0))
+            target = rings.get(target_id)
+            if target is None:
+                continue
+            r_src = ring.resources
+            actual = min(amount, r_src.power)
+            rings[action.ring_id] = ring.model_copy(update={
+                "resources": r_src.model_copy(update={"power": r_src.power - actual}),
+            })
+            r_tgt = target.resources
+            rings[target_id] = target.model_copy(update={
+                "resources": r_tgt.model_copy(update={
+                    "power": min(cfg.resource_capacity, r_tgt.power + actual),
+                }),
+            })
+
+        elif action.action_type == ActionType.PRIORITIZE_MAINTENANCE:
+            new_modifiers.append(ActiveModifier(
+                modifier_id=action.action_id,
+                action_type=ActionType.PRIORITIZE_MAINTENANCE,
+                ring_id=action.ring_id,
+                parameters={},
+                expires_tick=state.tick + 50,
+            ))
+
+        elif action.action_type == ActionType.RATION_RESOURCE:
+            new_modifiers.append(ActiveModifier(
+                modifier_id=action.action_id,
+                action_type=ActionType.RATION_RESOURCE,
+                ring_id=action.ring_id,
+                parameters=action.parameters,
+                expires_tick=state.tick + 30,
+            ))
+
+        elif action.action_type == ActionType.BOOST_PRODUCTION:
+            new_modifiers.append(ActiveModifier(
+                modifier_id=action.action_id,
+                action_type=ActionType.BOOST_PRODUCTION,
+                ring_id=action.ring_id,
+                parameters=action.parameters,
+                expires_tick=state.tick + 30,
+            ))
+
+    kept_mods = [m for m in state.active_modifiers if m.expires_tick > state.tick]
+    return state.model_copy(update={
+        "rings": rings,
+        "pending_actions": [],
+        "active_modifiers": kept_mods + new_modifiers,
+    })
+
+
 def _tick_ring(
     ring: RingState,
     seed: int,
     tick_num: int,
     cfg: SimConfig,
     person_counter: int,
+    modifiers: list[ActiveModifier] | None = None,
 ) -> tuple[RingState, int]:
     population = list(ring.population)
     ring_id = ring.ring_id
+    if modifiers is None:
+        modifiers = []
 
     # 1. Age + health decay
     population = [age_person(p, cfg) for p in population]
@@ -76,9 +174,22 @@ def _tick_ring(
     pop_size = len(population)
     population = [apply_medic_heal(p, medic_count, pop_size, cfg) for p in population]
 
-    # 3 & 4. Resource consumption and production
+    # 3 & 4. Resource consumption and production (modifiers applied as multipliers)
+    consumption_mult = 1.0
+    production_mult = 1.0
+    for mod in modifiers:
+        if mod.action_type == ActionType.RATION_RESOURCE:
+            consumption_mult *= 0.8
+        elif mod.action_type == ActionType.BOOST_PRODUCTION:
+            production_mult *= 1.2
+
     consumed = consumption_for_ring(population, cfg)
     produced = production_for_ring(population, cfg)
+
+    if consumption_mult != 1.0:
+        consumed = {k: v * consumption_mult for k, v in consumed.items()}
+    if production_mult != 1.0:
+        produced = {k: v * production_mult for k, v in produced.items()}
 
     # 5. Apply net resource delta, clamped to [0, capacity]
     def net(resource: str, current: float) -> float:
@@ -110,8 +221,14 @@ def _tick_ring(
         for p in population
     ]
 
-    # 7. Pressure accumulation
+    # 7. Pressure accumulation (PRIORITIZE_MAINTENANCE applies extra debt reduction)
     new_pressures = accumulate_pressures(ring.pressures, population, cfg)
+    if any(m.action_type == ActionType.PRIORITIZE_MAINTENANCE for m in modifiers):
+        # Extra engineer focus: remove ~70% of base debt accumulation rate per tick
+        extra_reduction = cfg.maintenance_debt_rate * 0.7
+        new_pressures = new_pressures.model_copy(update={
+            "maintenance_debt": max(0.0, new_pressures.maintenance_debt - extra_reduction),
+        })
 
     # 8. Ring aggregate morale
     ring_morale = _mean(p.morale for p in population) if population else 0.5

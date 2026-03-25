@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from sim.state import EventRecord
 
-from ..models import GameListItem, GameSummary
+from ..models import ActionRequest, ActionResponse, CaptainView, EngineerView, GameListItem, GameSummary, HistoryPoint
 from ..store import GameStore
 
 router = APIRouter(prefix="/games", tags=["games"])
@@ -86,6 +86,13 @@ def get_events(game_id: str, store: StoreDep, since: int = 0) -> list[EventRecor
     return [e for e in state.event_log if e.tick >= since]
 
 
+@router.get("/{game_id}/history", response_model=list[HistoryPoint])
+def get_history(game_id: str, store: StoreDep, limit: int = 200) -> list[HistoryPoint]:
+    if store.get(game_id) is None:
+        raise HTTPException(status_code=404, detail="Game not found")
+    return store.get_history(game_id, limit=min(limit, 1000))
+
+
 @router.post("/{game_id}/pause", response_model=GameSummary)
 def pause_game(game_id: str, store: StoreDep) -> GameSummary:
     if not store.pause(game_id):
@@ -115,6 +122,28 @@ async def advance_game(game_id: str, body: AdvanceRequest, store: StoreDep) -> G
     summary = store.get_summary(game_id)
     assert summary is not None
     return summary
+
+
+@router.get("/{game_id}/roles/{role}/view", response_model=EngineerView | CaptainView)
+def get_role_view(game_id: str, role: str, store: StoreDep) -> EngineerView | CaptainView:
+    """Return a role-filtered view of game state encoding information asymmetry."""
+    view = store.get_role_view(game_id, role)
+    if view is None:
+        raise HTTPException(status_code=404, detail="Game not found")
+    if view == "unknown_role":
+        raise HTTPException(status_code=404, detail=f"Unknown role: {role}")
+    return view  # type: ignore[return-value]
+
+
+@router.post("/{game_id}/actions", response_model=ActionResponse)
+async def submit_action(game_id: str, body: ActionRequest, store: StoreDep) -> ActionResponse:
+    """Submit a role action. Engine validates and applies on the next tick."""
+    result = await store.submit_action(game_id, body)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Game not found")
+    if result.status == "rejected":
+        raise HTTPException(status_code=422, detail=result.detail)
+    return result
 
 
 @router.delete("/{game_id}", status_code=status.HTTP_204_NO_CONTENT)

@@ -11,17 +11,33 @@ One GameStore instance lives for the lifetime of the FastAPI app (created in lif
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 from sim.events import EventDef
 from sim.initializer import build_initial_state
-from sim.state import GameState, SimConfig
+from sim.state import ActionType, GameState, PendingAction, SimConfig
 from sim.tick import tick as sim_tick
 
-from .models import GameListItem, GameSummary, summarize_state
+from .models import (
+    ActionRequest,
+    ActionResponse,
+    CaptainView,
+    EngineerView,
+    GameListItem,
+    GameSummary,
+    HistoryPoint,
+    RingHistoryPoint,
+    build_captain_view,
+    build_engineer_view,
+    summarize_state,
+)
+
+log = logging.getLogger(__name__)
 
 
 class GameStore:
@@ -56,6 +72,28 @@ class GameStore:
                     tick_rate  REAL NOT NULL DEFAULT 1.0,
                     state_json TEXT NOT NULL,
                     updated_at REAL NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS history (
+                    game_id   TEXT NOT NULL,
+                    tick      INTEGER NOT NULL,
+                    data_json TEXT NOT NULL,
+                    PRIMARY KEY (game_id, tick)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS agent_decisions (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    game_id     TEXT NOT NULL,
+                    tick        INTEGER NOT NULL,
+                    role        TEXT NOT NULL,
+                    action_type TEXT NOT NULL,
+                    ring_id     TEXT NOT NULL,
+                    reasoning   TEXT NOT NULL DEFAULT '',
+                    provider    TEXT NOT NULL DEFAULT '',
+                    model       TEXT NOT NULL DEFAULT '',
+                    created_at  REAL NOT NULL
                 )
             """)
             conn.commit()
@@ -168,6 +206,8 @@ class GameStore:
         event_defs = self._event_defs
         for _ in range(ticks):
             state = await loop.run_in_executor(None, sim_tick, state, cfg, event_defs)
+            if state.tick % 10 == 0:
+                await loop.run_in_executor(None, self._write_history, game_id, state)
         self._states[game_id] = state
         await self.broadcast(game_id, state)
         return state
@@ -183,6 +223,92 @@ class GameStore:
         if state is None:
             return None
         return summarize_state(state, self._tick_rates.get(game_id, 1.0), game_id in self._paused)
+
+    def get_role_view(
+        self, game_id: str, role: str
+    ) -> EngineerView | CaptainView | None | str:
+        """Return a role-filtered state view. Returns None if game not found, 'unknown_role' for bad role."""
+        state = self._states.get(game_id)
+        if state is None:
+            return None
+        cap = self._cfg.resource_capacity
+        if role == "engineer":
+            return build_engineer_view(state, cap)
+        if role == "captain":
+            return build_captain_view(state, cap)
+        return "unknown_role"
+
+    async def submit_action(
+        self, game_id: str, request: ActionRequest
+    ) -> ActionResponse | None:
+        """Validate and enqueue a player/agent action. Applied at the start of the next tick."""
+        state = self._states.get(game_id)
+        if state is None:
+            return None
+
+        # Validate action_type
+        try:
+            action_type = ActionType(request.action_type)
+        except ValueError:
+            return ActionResponse(
+                action_id="",
+                status="rejected",
+                detail=f"Unknown action_type: {request.action_type}",
+                applied_tick=state.tick,
+            )
+
+        # Validate ring_id
+        if request.ring_id not in state.rings:
+            return ActionResponse(
+                action_id="",
+                status="rejected",
+                detail=f"Unknown ring_id: {request.ring_id}",
+                applied_tick=state.tick,
+            )
+
+        action_id = str(uuid.uuid4())
+        pending = PendingAction(
+            action_id=action_id,
+            role=request.role,
+            action_type=action_type,
+            ring_id=request.ring_id,
+            parameters=request.parameters,
+            submitted_tick=state.tick,
+        )
+        new_state = state.model_copy(update={
+            "pending_actions": list(state.pending_actions) + [pending],
+        })
+        self._states[game_id] = new_state
+        log.debug(
+            "action accepted game=%s tick=%d role=%s type=%s ring=%s",
+            game_id, state.tick, request.role, request.action_type, request.ring_id,
+        )
+        return ActionResponse(
+            action_id=action_id,
+            status="accepted",
+            applied_tick=state.tick + 1,
+        )
+
+    def log_agent_decision(
+        self,
+        game_id: str,
+        tick: int,
+        role: str,
+        action_type: str,
+        ring_id: str,
+        reasoning: str,
+        provider: str,
+        model: str,
+    ) -> None:
+        """Persist an agent decision to the agent_decisions table (sync, call via executor)."""
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute(
+                """INSERT INTO agent_decisions
+                   (game_id, tick, role, action_type, ring_id, reasoning, provider, model, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (game_id, tick, role, action_type, ring_id, reasoning, provider, model, time.time()),
+            )
+            conn.commit()
 
     # ------------------------------------------------------------------
     # WebSocket subscriptions
@@ -216,6 +342,23 @@ class GameStore:
             except asyncio.QueueFull:
                 pass  # slow client — skip this frame
 
+    async def _broadcast_decision_window(self, game_id: str, state: GameState) -> None:
+        subs = self._subscribers.get(game_id)
+        if not subs:
+            return
+        msg: dict[str, Any] = {
+            "type": "decision_window",
+            "game_id": game_id,
+            "tick": state.tick,
+            "year": round(state.year, 2),
+        }
+        log.debug("decision_window opened game=%s tick=%d", game_id, state.tick)
+        for q in list(subs):
+            try:
+                q.put_nowait(msg)
+            except asyncio.QueueFull:
+                pass
+
     # ------------------------------------------------------------------
     # Background tick loop
     # ------------------------------------------------------------------
@@ -237,6 +380,10 @@ class GameStore:
                 break
             self._states[game_id] = new_state
             await self.broadcast(game_id, new_state)
+            # Decision window notification — broadcast when window opens
+            interval = new_state.decision_window_interval
+            if interval > 0 and new_state.tick % interval == 0:
+                await self._broadcast_decision_window(game_id, new_state)
             if new_state.tick % 100 == 0:
                 await loop.run_in_executor(
                     None,
@@ -246,12 +393,49 @@ class GameStore:
                     self._tick_rates.get(game_id, 1.0),
                     new_state.model_dump_json(),
                 )
+            if new_state.tick % 10 == 0:
+                await loop.run_in_executor(None, self._write_history, game_id, new_state)
             tick_rate = self._tick_rates.get(game_id, 1.0)
             await asyncio.sleep(1.0 / tick_rate)
 
     # ------------------------------------------------------------------
+    # History
+    # ------------------------------------------------------------------
+
+    def get_history(self, game_id: str, limit: int = 200) -> list[HistoryPoint]:
+        with sqlite3.connect(self._db_path) as conn:
+            rows = conn.execute(
+                "SELECT data_json FROM history WHERE game_id = ? ORDER BY tick DESC LIMIT ?",
+                (game_id, limit),
+            ).fetchall()
+        points = [HistoryPoint.model_validate_json(r[0]) for r in rows]
+        return list(reversed(points))  # chronological order
+
+    # ------------------------------------------------------------------
     # SQLite helpers (sync — run in executor)
     # ------------------------------------------------------------------
+
+    def _write_history(self, game_id: str, state: GameState) -> None:
+        rings: dict[str, RingHistoryPoint] = {}
+        for ring_id, ring in state.rings.items():
+            pop = ring.population
+            n = len(pop)
+            rings[ring_id] = RingHistoryPoint(
+                population=n,
+                mean_health=round(sum(p.health for p in pop) / n, 3) if n else 0.0,
+                mean_morale=round(sum(p.morale for p in pop) / n, 3) if n else 0.0,
+                food=round(ring.resources.food, 1),
+                water=round(ring.resources.water, 1),
+                oxygen=round(ring.resources.oxygen, 1),
+                power=round(ring.resources.power, 1),
+            )
+        point = HistoryPoint(tick=state.tick, year=round(state.year, 2), rings=rings)
+        with sqlite3.connect(self._db_path) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO history (game_id, tick, data_json) VALUES (?, ?, ?)",
+                (game_id, state.tick, point.model_dump_json()),
+            )
+            conn.commit()
 
     def _load_all_from_db(self) -> list[tuple[str, int, float, str]]:
         with sqlite3.connect(self._db_path) as conn:
