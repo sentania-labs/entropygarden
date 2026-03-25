@@ -1,0 +1,182 @@
+# Generation Ship Event Definitions
+#
+# trigger.type: "threshold" | "random"
+#   threshold: fires when ring.pressures.{pressure} >= threshold and cooldown elapsed
+#   random:    fires with probability_per_tick chance per tick
+# scope: "ring" | "ship"
+#   ring:  evaluated per-ring; effects apply to that ring only
+#   ship:  evaluated once; effects apply to all rings
+# effects keys:
+#   food_delta, water_delta, oxygen_delta, power_delta  (resource absolute change)
+#   maintenance_debt_delta, ecological_drift_delta, social_tension_delta
+#   morale_delta   (applied to every person in ring)
+#   health_delta   (applied to every person in ring)
+#   population_loss  (int: remove N lowest-health people)
+
+events:
+
+  # -------------------------------------------------------------------------
+  # Threshold: maintenance_debt
+  # -------------------------------------------------------------------------
+
+  - id: hull_microfracture
+    name: "Hull Microfracture"
+    description: "Stress sensors detect hairline fractures in the outer hull plating. Emergency sealant teams are dispatched."
+    trigger:
+      type: threshold
+      pressure: maintenance_debt
+      threshold: 0.5
+      cooldown_ticks: 730
+    scope: ring
+    effects:
+      power_delta: -40.0
+      maintenance_debt_delta: 0.05
+
+  - id: reactor_instability
+    name: "Reactor Instability"
+    description: "Ring reactor output is fluctuating dangerously. Engineers scramble to stabilize the plasma containment field."
+    trigger:
+      type: threshold
+      pressure: maintenance_debt
+      threshold: 0.7
+      cooldown_ticks: 365
+    scope: ring
+    effects:
+      power_delta: -120.0
+      maintenance_debt_delta: 0.08
+
+  - id: water_recycler_failure
+    name: "Water Recycler Failure"
+    description: "The primary water reclamation unit has seized. Backup systems are struggling to compensate."
+    trigger:
+      type: threshold
+      pressure: maintenance_debt
+      threshold: 0.6
+      cooldown_ticks: 548
+    scope: ring
+    effects:
+      water_delta: -80.0
+      maintenance_debt_delta: 0.06
+
+  # -------------------------------------------------------------------------
+  # Threshold: ecological_drift
+  # -------------------------------------------------------------------------
+
+  - id: crop_blight
+    name: "Crop Blight"
+    description: "A fungal pathogen has swept through the hydroponic bays. Harvest yields are severely reduced."
+    trigger:
+      type: threshold
+      pressure: ecological_drift
+      threshold: 0.5
+      cooldown_ticks: 730
+    scope: ring
+    effects:
+      food_delta: -100.0
+      ecological_drift_delta: 0.06
+
+  - id: atmosphere_contamination
+    name: "Atmosphere Contamination"
+    description: "Trace toxins detected in the ring atmosphere. Air scrubbers are running at maximum capacity."
+    trigger:
+      type: threshold
+      pressure: ecological_drift
+      threshold: 0.7
+      cooldown_ticks: 365
+    scope: ring
+    effects:
+      oxygen_delta: -60.0
+      ecological_drift_delta: 0.08
+      health_delta: -0.05
+
+  # -------------------------------------------------------------------------
+  # Threshold: social_tension
+  # -------------------------------------------------------------------------
+
+  - id: labor_unrest
+    name: "Labor Unrest"
+    description: "Workers are staging slowdowns and work-to-rule actions. Productivity has dropped and grievances are mounting."
+    trigger:
+      type: threshold
+      pressure: social_tension
+      threshold: 0.5
+      cooldown_ticks: 548
+    scope: ring
+    effects:
+      morale_delta: -0.08
+      social_tension_delta: 0.05
+
+  - id: food_riots
+    name: "Food Riots"
+    description: "Desperate residents have stormed the food distribution center. Security forces cannot contain the situation."
+    trigger:
+      type: threshold
+      pressure: social_tension
+      threshold: 0.8
+      cooldown_ticks: 365
+    scope: ring
+    effects:
+      morale_delta: -0.15
+      social_tension_delta: 0.10
+      population_loss: 5
+
+  # -------------------------------------------------------------------------
+  # Random: per-ring
+  # -------------------------------------------------------------------------
+
+  - id: equipment_malfunction
+    name: "Equipment Malfunction"
+    description: "A critical maintenance drone has failed mid-repair cycle, leaving a backlog of unattended faults."
+    trigger:
+      type: random
+      probability_per_tick: 0.001
+    scope: ring
+    effects:
+      maintenance_debt_delta: 0.03
+      power_delta: -20.0
+
+  - id: fungal_bloom
+    name: "Fungal Bloom"
+    description: "An unexpected fungal bloom has overtaken one of the hydroponic bays. Short-term food surplus, long-term ecological instability."
+    trigger:
+      type: random
+      probability_per_tick: 0.0008
+    scope: ring
+    effects:
+      food_delta: 80.0
+      ecological_drift_delta: 0.04
+
+  - id: community_festival
+    name: "Community Festival"
+    description: "Ring residents have organized an impromptu celebration. Laughter echoes through the corridors for the first time in months."
+    trigger:
+      type: random
+      probability_per_tick: 0.0003
+    scope: ring
+    effects:
+      morale_delta: 0.06
+
+  - id: contaminated_water
+    name: "Contaminated Water Batch"
+    description: "A recycling error has introduced contaminants into the water supply. Several residents are reporting illness."
+    trigger:
+      type: random
+      probability_per_tick: 0.0006
+    scope: ring
+    effects:
+      water_delta: -30.0
+      health_delta: -0.03
+
+  # -------------------------------------------------------------------------
+  # Random: ship-wide
+  # -------------------------------------------------------------------------
+
+  - id: stellar_radiation
+    name: "Stellar Radiation Surge"
+    description: "An unexpected solar particle event has saturated the hull shielding. All rings are reporting elevated radiation exposure."
+    trigger:
+      type: random
+      probability_per_tick: 0.0002
+    scope: ship
+    effects:
+      health_delta: -0.04
