@@ -73,7 +73,7 @@ def run(seed: int, ticks: int, verbose: bool, output_json: bool) -> None:
         event_defs = load_events(_EVENTS_PATH)
 
     if not output_json:
-        print(f"Ark Drift — seed={seed}, pop={sum(len(r.population) for r in state.rings.values())}")
+        print(f"Entropy Garden — seed={seed}, pop={sum(len(r.population) for r in state.rings.values())}")
         print(f"Running {ticks} ticks ({ticks/365:.1f} game-years)...\n")
 
     if verbose:
