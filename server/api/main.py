@@ -23,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sim.events import load_events
 from sim.state import SimConfig
 
-from .routes import games, ws
+from .routes import games, windows, ws
 from .store import GameStore
 
 log = logging.getLogger(__name__)
@@ -65,6 +65,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             agent_service=agent_service,
             store=store,
         )
+        store.register_agent_runner(agent_game_id, agent_role, runner)
         agent_task = asyncio.create_task(runner.run())
         log.info(
             "Agent runner started: game=%s role=%s provider=%s model=%s",
@@ -100,4 +101,5 @@ app.add_middleware(
 )
 
 app.include_router(games.router)
+app.include_router(windows.router)
 app.include_router(ws.router)

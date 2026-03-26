@@ -38,6 +38,7 @@ class CreateGameRequest(BaseModel):
     seed: int = 42
     tick_rate: float = 1.0
     paused: bool = False
+    decision_window_interval: int = 100
 
 
 class AdvanceRequest(BaseModel):
@@ -51,7 +52,12 @@ class AdvanceRequest(BaseModel):
 
 @router.post("", status_code=status.HTTP_201_CREATED, response_model=GameSummary)
 async def create_game(body: CreateGameRequest, store: StoreDep) -> GameSummary:
-    state = await store.create(seed=body.seed, tick_rate=body.tick_rate, paused=body.paused)
+    state = await store.create(
+        seed=body.seed,
+        tick_rate=body.tick_rate,
+        paused=body.paused,
+        decision_window_interval=body.decision_window_interval,
+    )
     summary = store.get_summary(state.game_id)
     assert summary is not None
     return summary

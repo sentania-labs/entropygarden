@@ -14,6 +14,8 @@ import logging
 
 from api.models import ActionRequest
 from api.store import GameStore
+from sim.policy import policy_to_context
+from sim.state import Policy
 
 from .agent import AgentService
 
@@ -78,14 +80,25 @@ class AgentRunner:
             self._store.unsubscribe(self._game_id, queue)
             log.info("AgentRunner stopped: game=%s role=%s", self._game_id, self._role)
 
-    async def _act(self, window_tick: int) -> None:
-        """Fetch role view, call agent, submit action, log decision."""
+    async def run_fallback(self, window_tick: int, policy: Policy) -> None:
+        """One-shot fallback act called by store when this role missed a window."""
+        await self._act(window_tick, policy=policy)
+
+    async def _act(self, window_tick: int, policy: Policy | None = None) -> None:
+        """Fetch role view, call agent, submit action, log decision.
+
+        policy: if provided (absent-role fallback path), inject standing orders
+        as context into the LLM prompt via the role_view dict.
+        """
         view = self._store.get_role_view(self._game_id, self._role)
         if view is None or isinstance(view, str):
             log.warning("AgentRunner: could not get role view (game=%s role=%s)", self._game_id, self._role)
             return
 
         role_view_dict = view.model_dump()
+
+        if policy is not None:
+            role_view_dict["policy_context"] = policy_to_context(policy)
 
         try:
             decision = await self._agent.decide(

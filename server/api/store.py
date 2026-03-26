@@ -20,8 +20,18 @@ from typing import Any
 
 from sim.events import EventDef
 from sim.initializer import build_initial_state
-from sim.state import ActionType, GameState, PendingAction, SimConfig
+from sim.policy import compliance_check, get_absent_roles
+from sim.state import (
+    ActionType,
+    DecisionWindow,
+    GameState,
+    PendingAction,
+    Policy,
+    SimConfig,
+    WindowStatus,
+)
 from sim.tick import tick as sim_tick
+from sim.windows import open_window, resolve_window
 
 from .models import (
     ActionRequest,
@@ -56,6 +66,10 @@ class GameStore:
         self._paused: set[str] = set()
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
+        # role → AgentRunner, keyed by game_id → role → runner
+        self._agent_runners: dict[str, dict[str, Any]] = {}
+        # fire-and-forget fallback tasks; held to prevent GC before completion
+        self._fallback_tasks: set[asyncio.Task[None]] = set()
 
         self._init_db()
 
@@ -126,12 +140,20 @@ class GameStore:
     # CRUD
     # ------------------------------------------------------------------
 
-    async def create(self, seed: int, tick_rate: float = 1.0, paused: bool = False) -> GameState:
+    async def create(
+        self,
+        seed: int,
+        tick_rate: float = 1.0,
+        paused: bool = False,
+        decision_window_interval: int = 100,
+    ) -> GameState:
         """Build initial state, persist it, and start (or not) the tick loop."""
         loop = asyncio.get_running_loop()
         state: GameState = await loop.run_in_executor(
             None, build_initial_state, seed, self._cfg
         )
+        if decision_window_interval != 100:
+            state = state.model_copy(update={"decision_window_interval": decision_window_interval})
         game_id = state.game_id
         self._states[game_id] = state
         self._tick_rates[game_id] = tick_rate
@@ -206,6 +228,12 @@ class GameStore:
         event_defs = self._event_defs
         for _ in range(ticks):
             state = await loop.run_in_executor(None, sim_tick, state, cfg, event_defs)
+            self._states[game_id] = state
+            interval = state.decision_window_interval
+            if interval > 0 and state.tick > 0 and state.tick % interval == 0:
+                state = await self._open_window(game_id, state)
+                self._states[game_id] = state
+                await self._broadcast_decision_window(game_id, state)
             if state.tick % 10 == 0:
                 await loop.run_in_executor(None, self._write_history, game_id, state)
         self._states[game_id] = state
@@ -275,9 +303,20 @@ class GameStore:
             parameters=request.parameters,
             submitted_tick=state.tick,
         )
-        new_state = state.model_copy(update={
+        updates: dict[str, Any] = {
             "pending_actions": list(state.pending_actions) + [pending],
-        })
+        }
+        # Record the role as having submitted during this window
+        if (
+            state.current_window
+            and state.current_window.status == WindowStatus.OPEN
+            and request.role not in state.current_window.submitted
+        ):
+                new_submitted = list(state.current_window.submitted) + [request.role]
+                updates["current_window"] = state.current_window.model_copy(
+                    update={"submitted": new_submitted}
+                )
+        new_state = state.model_copy(update=updates)
         self._states[game_id] = new_state
         log.debug(
             "action accepted game=%s tick=%d role=%s type=%s ring=%s",
@@ -346,11 +385,14 @@ class GameStore:
         subs = self._subscribers.get(game_id)
         if not subs:
             return
+        window = state.current_window
         msg: dict[str, Any] = {
             "type": "decision_window",
             "game_id": game_id,
             "tick": state.tick,
             "year": round(state.year, 2),
+            "window_id": window.window_id if window else None,
+            "closes_tick": window.closes_tick if window else None,
         }
         log.debug("decision_window opened game=%s tick=%d", game_id, state.tick)
         for q in list(subs):
@@ -358,6 +400,150 @@ class GameStore:
                 q.put_nowait(msg)
             except asyncio.QueueFull:
                 pass
+
+    # ------------------------------------------------------------------
+    # Window lifecycle
+    # ------------------------------------------------------------------
+
+    async def _open_window(self, game_id: str, state: GameState) -> GameState:
+        """Close the current window (if open) then open a new one."""
+        if state.current_window and state.current_window.status == WindowStatus.OPEN:
+            state = await self._close_window(game_id, state)
+        new_window = open_window(
+            opened_tick=state.tick,
+            interval=state.decision_window_interval,
+        )
+        return state.model_copy(update={"current_window": new_window})
+
+    async def _close_window(self, game_id: str, state: GameState) -> GameState:
+        """Resolve the current window: apply conflict resolution and dispatch policy fallbacks."""
+        window = state.current_window
+        if window is None or window.status != WindowStatus.OPEN:
+            return state
+
+        closed_window, accepted_actions = resolve_window(window, list(state.pending_actions))
+
+        # Determine absent roles and populate fallback_roles in resolution
+        active_roles = list((self._agent_runners.get(game_id) or {}).keys()) or None
+        submitted = list(window.submitted)
+        absent = get_absent_roles(submitted, active_roles)
+
+        fallback_roles: list[str] = []
+        for role in absent:
+            policy = state.policies.get(role)
+            if policy is None:
+                continue
+            # Compliance check using a simple deterministic value for MVP
+            # (seeded PRNG integration can be added later)
+            if not compliance_check(policy, 0.5):
+                continue
+            fallback_roles.append(role)
+            # Dispatch fallback as a fire-and-forget task
+            task = asyncio.create_task(
+                self._fallback_for_role(game_id, role, state.tick, policy)
+            )
+            self._fallback_tasks.add(task)
+            task.add_done_callback(self._fallback_tasks.discard)
+
+        # Update resolution with actual fallback_roles
+        if closed_window.resolution is not None:
+            updated_resolution = closed_window.resolution.model_copy(
+                update={"fallback_roles": fallback_roles}
+            )
+            closed_window = closed_window.model_copy(update={"resolution": updated_resolution})
+
+        # Cap window history at 100 entries
+        history = list(state.window_history[-99:]) + [closed_window]
+
+        return state.model_copy(update={
+            "pending_actions": accepted_actions,
+            "current_window": closed_window,
+            "window_history": history,
+        })
+
+    async def _fallback_for_role(
+        self,
+        game_id: str,
+        role: str,
+        window_tick: int,
+        policy: Policy,
+    ) -> None:
+        """Generate and submit a fallback action for an absent role.
+
+        If an AgentRunner is registered for this role, delegate to it (LLM path).
+        Otherwise use the deterministic path: submit the first policy priority directly.
+        """
+        runners = self._agent_runners.get(game_id, {})
+        runner = runners.get(role)
+        if runner is not None:
+            try:
+                await runner.run_fallback(window_tick, policy)
+            except Exception:
+                log.exception("fallback runner failed game=%s role=%s", game_id, role)
+            return
+
+        # Deterministic path: no agent configured — submit first priority directly
+        if not policy.priorities:
+            return
+        priority = policy.priorities[0]
+        from .models import ActionRequest
+        request = ActionRequest(
+            role=role,
+            action_type=priority.action_type,
+            ring_id=priority.ring_id,
+            parameters=priority.parameters,
+            reasoning=f"Policy fallback: {priority.note}" if priority.note else "Policy fallback",
+        )
+        result = await self.submit_action(game_id, request)
+        if result is None or result.status == "rejected":
+            log.warning(
+                "policy fallback action rejected game=%s role=%s action=%s",
+                game_id, role, priority.action_type,
+            )
+        else:
+            log.info(
+                "policy fallback submitted game=%s role=%s action=%s ring=%s",
+                game_id, role, priority.action_type, priority.ring_id,
+            )
+
+    # ------------------------------------------------------------------
+    # Window queries
+    # ------------------------------------------------------------------
+
+    def get_current_window(self, game_id: str) -> DecisionWindow | None:
+        state = self._states.get(game_id)
+        if state is None:
+            return None
+        if state.current_window and state.current_window.status == WindowStatus.OPEN:
+            return state.current_window
+        return None
+
+    def get_window_history(self, game_id: str, limit: int = 50) -> list[DecisionWindow]:
+        state = self._states.get(game_id)
+        if state is None:
+            return []
+        history = state.window_history
+        return list(reversed(history))[:limit]
+
+    def set_policy(self, game_id: str, role: str, policy: Policy) -> bool:
+        state = self._states.get(game_id)
+        if state is None:
+            return False
+        new_policies = dict(state.policies)
+        new_policies[role] = policy
+        self._states[game_id] = state.model_copy(update={"policies": new_policies})
+        return True
+
+    def get_policy(self, game_id: str, role: str) -> Policy | None:
+        state = self._states.get(game_id)
+        if state is None:
+            return None
+        return state.policies.get(role)
+
+    def register_agent_runner(self, game_id: str, role: str, runner: Any) -> None:
+        if game_id not in self._agent_runners:
+            self._agent_runners[game_id] = {}
+        self._agent_runners[game_id][role] = runner
 
     # ------------------------------------------------------------------
     # Background tick loop
@@ -380,9 +566,11 @@ class GameStore:
                 break
             self._states[game_id] = new_state
             await self.broadcast(game_id, new_state)
-            # Decision window notification — broadcast when window opens
+            # Decision window lifecycle — open new window (closes previous) at interval
             interval = new_state.decision_window_interval
-            if interval > 0 and new_state.tick % interval == 0:
+            if interval > 0 and new_state.tick > 0 and new_state.tick % interval == 0:
+                new_state = await self._open_window(game_id, new_state)
+                self._states[game_id] = new_state
                 await self._broadcast_decision_window(game_id, new_state)
             if new_state.tick % 100 == 0:
                 await loop.run_in_executor(

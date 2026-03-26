@@ -108,6 +108,57 @@ class ActionType(str, Enum):
     BOOST_PRODUCTION = "boost_production"              # +20% production for 30 ticks
 
 
+# ---------------------------------------------------------------------------
+# Decision windows
+# ---------------------------------------------------------------------------
+
+
+class WindowStatus(str, Enum):
+    OPEN = "open"
+    CLOSED = "closed"
+
+
+class RejectedAction(BaseModel):
+    action_id: str
+    role: str
+    reason: str
+    overridden_by_role: str | None = None
+
+
+class WindowResolution(BaseModel):
+    accepted_action_ids: list[str] = Field(default_factory=list)
+    rejected: list[RejectedAction] = Field(default_factory=list)
+    fallback_roles: list[str] = Field(default_factory=list)
+
+
+class DecisionWindow(BaseModel):
+    window_id: str
+    opened_tick: int
+    closes_tick: int
+    status: WindowStatus = WindowStatus.OPEN
+    submitted: list[str] = Field(default_factory=list)   # roles that submitted an action
+    resolution: WindowResolution | None = None
+
+
+# ---------------------------------------------------------------------------
+# Policies
+# ---------------------------------------------------------------------------
+
+
+class PolicyPriority(BaseModel):
+    action_type: str        # must be a valid ActionType value
+    ring_id: str
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    note: str = ""          # human-readable rationale shown to LLM as context
+
+
+class Policy(BaseModel):
+    role: str
+    priorities: list[PolicyPriority] = Field(default_factory=list)
+    # Compliance probability 0–1; stubbed at 1.0 for MVP, can be tuned later
+    compliance: float = Field(default=1.0, ge=0.0, le=1.0)
+
+
 class PendingAction(BaseModel):
     action_id: str
     role: str
@@ -140,6 +191,9 @@ class GameState(BaseModel):
     pending_actions: list[PendingAction] = Field(default_factory=list)
     active_modifiers: list[ActiveModifier] = Field(default_factory=list)
     decision_window_interval: int = 100  # ticks between decision windows
+    current_window: DecisionWindow | None = None
+    policies: dict[str, Policy] = Field(default_factory=dict)       # role → Policy
+    window_history: list[DecisionWindow] = Field(default_factory=list)
 
     @property
     def year(self) -> float:
