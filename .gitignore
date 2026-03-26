@@ -13,3 +13,10 @@ venv/
 node_modules/
 .DS_Store
 *.db
+
+# Dev runtime data — bind mount targets for docker-compose.yml
+# Directories are tracked (via .gitkeep); contents are not.
+local/db/*
+local/client_modules/*
+!local/db/.gitkeep
+!local/client_modules/.gitkeep

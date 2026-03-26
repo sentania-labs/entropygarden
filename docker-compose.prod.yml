@@ -1,0 +1,33 @@
+# Production — named volumes, no source mounts, no hot reload
+# Usage:
+#   docker compose -f docker-compose.prod.yml build
+#   docker compose -f docker-compose.prod.yml up -d
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: docker/server/Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - db_data:/data
+    environment:
+      - ENTROPY_GARDEN_DB=/data/entropy_garden.db
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+    restart: unless-stopped
+
+  client:
+    build:
+      context: .
+      dockerfile: docker/client/Dockerfile
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=${VITE_API_URL:-http://localhost:8000}
+    depends_on:
+      - server
+    restart: unless-stopped
+
+volumes:
+  db_data:
