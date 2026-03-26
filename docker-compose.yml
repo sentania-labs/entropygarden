@@ -1,10 +1,15 @@
-# Development — bind mounts, hot reload, data stored in ./local/ (gitignored)
+# Development — bind mounts, hot reload, data in ./local/ (gitignored)
 #
-# Server only (port 8000 + Swagger UI at :8000/docs):
+# Server only (API on :8000, Swagger at :8000/docs):
 #   docker compose up
 #
-# Server + client + proxy (everything through port 80):
+# Server + client + HTTPS proxy (everything through :8443, HTTP :8080 redirects):
 #   docker compose --profile client up
+#
+# Ports are configurable via .env:
+#   HTTP_PORT=8080   (default)
+#   HTTPS_PORT=8443  (default)
+#   SSL_CN=localhost (CN for self-signed cert)
 
 services:
   server:
@@ -12,14 +17,14 @@ services:
       context: .
       dockerfile: docker/server/Dockerfile
     ports:
-      - "8000:8000"     # exposed in dev for direct curl / Swagger UI access
+      - "8000:8000"     # exposed in dev for direct curl / Swagger UI
     volumes:
-      - ./server:/app/server        # source — live reload picks up changes
-      - ./data:/app/data            # events.yaml and other seed data
-      - ./local/db:/data            # SQLite — browse at ./local/db/entropy_garden.db
+      - ./server:/app/server
+      - ./data:/app/data
+      - ./local/db:/data
     environment:
       - ENTROPY_GARDEN_DB=/data/entropy_garden.db
-      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:5173,http://localhost:80,http://localhost}
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}   # permissive in dev; same-origin via proxy anyway
     command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 
   client:
@@ -27,23 +32,32 @@ services:
       context: .
       dockerfile: docker/client/Dockerfile
     ports:
-      - "5173:5173"     # exposed in dev for direct access without proxy
+      - "5173:5173"     # exposed in dev for direct access
     volumes:
       - ./client:/app
       - ./local/client_modules:/app/node_modules
     environment:
-      - VITE_API_URL=${VITE_API_URL:-}    # empty = same-origin when behind proxy
+      - VITE_API_URL=   # empty = same-origin when behind proxy
     depends_on:
       - server
     profiles:
       - client
 
   proxy:
-    image: nginx:alpine
+    build:
+      context: .
+      dockerfile: docker/nginx/Dockerfile
     ports:
-      - "80:80"         # single entry point for LAN access
+      - "${HTTP_PORT:-8080}:${HTTP_PORT:-8080}"
+      - "${HTTPS_PORT:-8443}:${HTTPS_PORT:-8443}"
     volumes:
-      - ./docker/nginx/dev.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./docker/nginx/dev.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./local/ssl:/etc/nginx/ssl        # cert.pem + key.pem — auto-generated if absent
+    environment:
+      - HTTP_PORT=${HTTP_PORT:-8080}
+      - HTTPS_PORT=${HTTPS_PORT:-8443}
+      - SSL_CN=${SSL_CN:-localhost}
+      - NGINX_TEMPLATE=/etc/nginx/templates/default.conf.template
     depends_on:
       - server
       - client

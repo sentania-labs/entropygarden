@@ -18,5 +18,7 @@ node_modules/
 # Directories are tracked (via .gitkeep); contents are not.
 local/db/*
 local/client_modules/*
+local/ssl/*
 !local/db/.gitkeep
 !local/client_modules/.gitkeep
+!local/ssl/.gitkeep

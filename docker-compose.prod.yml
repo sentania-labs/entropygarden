@@ -1,40 +1,56 @@
 # Production — named volumes, no source mounts, no hot reload
-# API port is NOT exposed — all traffic enters through nginx on port 80.
+# HTTP :80 redirects to HTTPS :443. API and client ports not exposed.
 #
 # Usage:
 #   docker compose -f docker-compose.prod.yml build
 #   docker compose -f docker-compose.prod.yml up -d
+#
+# SSL certificates:
+#   Default: self-signed cert auto-generated into the ssl_data named volume on first run.
+#   Real cert: copy cert.pem and key.pem into the ssl_data volume, then restart the proxy.
+#     docker run --rm -v entropygarden_ssl_data:/ssl -v /your/certs:/src alpine \
+#       sh -c "cp /src/cert.pem /src/key.pem /ssl/"
+#     docker compose -f docker-compose.prod.yml restart proxy
 
 services:
   server:
     build:
       context: .
       dockerfile: docker/server/Dockerfile
-    # no ports: — server is internal only, not reachable outside Docker network
+    # no ports: — not reachable outside the Docker network
     volumes:
       - db_data:/data
     environment:
       - ENTROPY_GARDEN_DB=/data/entropy_garden.db
-      - CORS_ORIGINS=*    # moot — same-origin via proxy, but left permissive as a safety net
+      - CORS_ORIGINS=*
     restart: unless-stopped
 
   client:
     build:
       context: .
       dockerfile: docker/client/Dockerfile
-    # no ports: — client is internal only
+    # no ports:
     environment:
-      - VITE_API_URL=    # empty = same-origin, all API calls go through proxy
+      - VITE_API_URL=
     depends_on:
       - server
     restart: unless-stopped
 
   proxy:
-    image: nginx:alpine
+    build:
+      context: .
+      dockerfile: docker/nginx/Dockerfile
     ports:
-      - "80:80"           # only port exposed to the outside world
+      - "80:80"
+      - "443:443"
     volumes:
-      - ./docker/nginx/prod.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./docker/nginx/prod.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ssl_data:/etc/nginx/ssl
+    environment:
+      - HTTP_PORT=80
+      - HTTPS_PORT=443
+      - SSL_CN=${SSL_CN:-localhost}
+      - NGINX_TEMPLATE=/etc/nginx/templates/default.conf.template
     depends_on:
       - server
       - client
@@ -42,3 +58,4 @@ services:
 
 volumes:
   db_data:
+  ssl_data:    # cert.pem + key.pem — auto-generated on first run, replace for real cert

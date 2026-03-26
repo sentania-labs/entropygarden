@@ -1,10 +1,24 @@
+# Dev nginx config — rendered by entrypoint.sh
+# ${HTTP_PORT} and ${HTTPS_PORT} are substituted at container startup.
+# All other $variables are nginx built-ins and are left as-is.
+
+# HTTP → HTTPS redirect
 server {
-    listen 80;
+    listen ${HTTP_PORT};
+    return 301 https://$host:${HTTPS_PORT}$request_uri;
+}
+
+server {
+    listen ${HTTPS_PORT} ssl;
+
+    ssl_certificate     /etc/nginx/ssl/cert.pem;
+    ssl_certificate_key /etc/nginx/ssl/key.pem;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
 
     # -----------------------------------------------------------------------
-    # Game WebSocket connections  /games/{id}/ws
-    # Must be matched before the generic /games block below.
-    # WebSocket requires HTTP upgrade headers and a long read timeout.
+    # Game WebSocket  /games/{id}/ws
+    # Must match before the generic /games block.
     # -----------------------------------------------------------------------
     location ~ ^/games/.+/ws$ {
         proxy_pass         http://server:8000;
@@ -12,11 +26,11 @@ server {
         proxy_set_header   Upgrade    $http_upgrade;
         proxy_set_header   Connection "upgrade";
         proxy_set_header   Host       $host;
-        proxy_read_timeout 86400s;   # keep connection open for the life of the session
+        proxy_read_timeout 86400s;
     }
 
     # -----------------------------------------------------------------------
-    # REST API  /games, /docs, /openapi.json, /redoc
+    # REST API + Swagger UI (exposed in dev)
     # -----------------------------------------------------------------------
     location ~ ^/(games|docs|openapi\.json|redoc) {
         proxy_pass         http://server:8000;
@@ -24,12 +38,11 @@ server {
         proxy_set_header   Host              $host;
         proxy_set_header   X-Real-IP         $remote_addr;
         proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto https;
     }
 
     # -----------------------------------------------------------------------
     # React dev server + Vite HMR WebSocket
-    # Vite's hot-module-reload uses a WebSocket at /@vite/client — the
-    # Upgrade headers here handle that automatically.
     # -----------------------------------------------------------------------
     location / {
         proxy_pass         http://client:5173;

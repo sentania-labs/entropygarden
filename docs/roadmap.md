@@ -61,6 +61,40 @@ The goal: a human can sit down, open a browser, pick a role, watch the sim run, 
 - [ ] Faction emergence from population influence accumulation
 - [ ] Emergent role recognition: informal power structures that the system acknowledges
 
+### Phase 7 — Admin Interface
+
+An operator-facing dashboard separate from the player UI. Requires an auth layer first.
+
+**Auth layer (prerequisite):**
+- [ ] User accounts and sessions (currently no auth at all)
+- [ ] Role-based access: player vs. admin vs. superadmin
+- [ ] Session tokens / JWT — FastAPI dependency injection guards routes
+- [ ] Admin routes under `/admin/` blocked at nginx unless authenticated
+
+**Game management:**
+- [ ] List all active and stale games with age, player count, tick rate
+- [ ] Pause / resume / delete individual games
+- [ ] Configurable stale-game TTL — auto-expire games with no activity for N days
+- [ ] Game state inspector — browse rings, pressures, event log for any game
+- [ ] Note: `GameStore` already tracks multiple games in memory; the API surface is mostly there
+
+**Log viewer:**
+- [ ] Tail and search the audit log (every tick, event, and decision — not yet implemented)
+- [ ] Filter by game, role, tick range
+- [ ] Agent decision history (already in `agent_decisions` SQLite table)
+
+**SSL certificate management:**
+- [ ] Upload cert.pem + key.pem via admin UI (writes to ssl_data volume, triggers proxy reload)
+- [ ] Display cert expiry and CN
+- [ ] Let's Encrypt integration: certbot sidecar container handles ACME challenge and renewal
+  - Requires port 80 to be publicly reachable (HTTP challenge) or DNS API access (DNS challenge)
+  - Certbot writes to the ssl_data volume; proxy reloads on cert renewal
+
+**Infrastructure:**
+- [ ] Metrics endpoint (`/metrics`, Prometheus-compatible) — tick rate, active games, population counts
+- [ ] Health check endpoint (`/health`) — already implied by FastAPI but not explicit
+- [ ] Structured logging (JSON) so log aggregators (Loki, CloudWatch) can parse fields
+
 ---
 
 ## Infrastructure roadmap
