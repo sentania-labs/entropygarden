@@ -94,6 +94,8 @@ An operator-facing dashboard separate from the player UI. Requires an auth layer
 - [ ] Metrics endpoint (`/metrics`, Prometheus-compatible) — tick rate, active games, population counts
 - [ ] Health check endpoint (`/health`) — already implied by FastAPI but not explicit
 - [ ] Structured logging (JSON) so log aggregators (Loki, CloudWatch) can parse fields
+- [ ] Persistent container logs — configure Docker logging driver (json-file with rotation, or syslog) in docker-compose so logs survive container restarts; default Docker logging is in-memory only
+- [ ] Syslog export — forward container logs to an external syslog receiver (e.g. rsyslog, Graylog, Papertrail) via Docker's `syslog` logging driver or a Fluentd/Promtail sidecar
 
 ---
 

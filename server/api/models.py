@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from sim.state import ActionType, EventRecord, GameState
+from sim.state import ActionType, EventRecord, GameState, JourneyState
 
 
 class RingHistoryPoint(BaseModel):
@@ -35,6 +35,18 @@ class RingSummary(BaseModel):
     pressures: dict[str, float]
 
 
+class JourneySummary(BaseModel):
+    destination: str
+    total_distance_ly: float
+    distance_remaining_ly: float
+    progress_pct: float
+    fuel_pct: float
+    fuel_efficiency: float
+    next_milestone: str | None
+    eta_ticks: int | None
+    arrival_tick: int | None
+
+
 class GameSummary(BaseModel):
     game_id: str
     seed: int
@@ -44,6 +56,7 @@ class GameSummary(BaseModel):
     tick_rate: float
     paused: bool
     rings: dict[str, RingSummary]
+    journey: JourneySummary | None = None
 
 
 class GameListItem(BaseModel):
@@ -251,6 +264,8 @@ def summarize_state(state: GameState, tick_rate: float, paused: bool) -> GameSum
                 "social_tension": round(ring.pressures.social_tension, 4),
             },
         )
+    journey_summary = _summarize_journey(state.journey) if state.journey else None
+
     return GameSummary(
         game_id=state.game_id,
         seed=state.seed,
@@ -260,4 +275,35 @@ def summarize_state(state: GameState, tick_rate: float, paused: bool) -> GameSum
         tick_rate=tick_rate,
         paused=paused,
         rings=rings,
+        journey=journey_summary,
+    )
+
+
+def _summarize_journey(j: JourneyState) -> JourneySummary:
+    progress = (j.total_distance_ly - j.distance_remaining_ly) / j.total_distance_ly if j.total_distance_ly > 0 else 0.0
+
+    # Find next milestone
+    reached = set(j.milestones_reached)
+    next_ms = None
+    for ms in j.milestones:
+        if ms.milestone_id not in reached:
+            next_ms = ms.name
+            break
+
+    # ETA
+    eta = None
+    if j.distance_remaining_ly > 0 and j.base_speed > 0 and j.fuel > 0:
+        speed = j.base_speed * j.fuel_efficiency
+        eta = int(j.distance_remaining_ly / speed) if speed > 0 else None
+
+    return JourneySummary(
+        destination=j.destination,
+        total_distance_ly=round(j.total_distance_ly, 2),
+        distance_remaining_ly=round(j.distance_remaining_ly, 4),
+        progress_pct=round(progress * 100, 1),
+        fuel_pct=round(j.fuel / j.fuel_capacity * 100, 1) if j.fuel_capacity > 0 else 0.0,
+        fuel_efficiency=round(j.fuel_efficiency, 3),
+        next_milestone=next_ms,
+        eta_ticks=eta,
+        arrival_tick=j.arrival_tick,
     )

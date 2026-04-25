@@ -28,6 +28,17 @@ export function Header({ summary, connected, role, onRoleChange, onPause, onResu
       <span className="text-dim tabular-nums shrink-0">YR {summary.year.toFixed(1)}</span>
       <span className="text-dim tabular-nums shrink-0">DAY {summary.tick.toLocaleString()}</span>
       <span className="text-dim tabular-nums shrink-0">POP {summary.total_population.toLocaleString()}</span>
+      {summary.journey && (
+        <>
+          <span className="text-border select-none">│</span>
+          <span className={`tabular-nums shrink-0 ${
+            summary.journey.arrival_tick != null ? 'text-green' :
+            summary.journey.fuel_pct <= 0 ? 'text-red' : 'text-amber'
+          }`}>
+            {summary.journey.destination.toUpperCase()} — {summary.journey.progress_pct.toFixed(1)}%
+          </span>
+        </>
+      )}
 
       <span className="text-border select-none">│</span>
 

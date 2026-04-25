@@ -7,6 +7,7 @@ import type { Role, Tab } from '../types'
 import { Header } from './Header'
 import { RingView } from './RingView'
 import { ShipOverview } from './ShipOverview'
+import { WindowBar } from './WindowBar'
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'ship',   label: 'SHIP'   },
@@ -24,7 +25,7 @@ export function Dashboard({ gameId, onExit }: Props) {
   const [role, setRole] = useState<Role>('captain')
   const [tab,  setTab]  = useState<Tab>('ship')
 
-  const { summary, connected } = useGameSocket(gameId)
+  const { summary, connected, window: decisionWindow } = useGameSocket(gameId)
   const events  = useEvents(gameId)
   const history = useHistory(gameId)
 
@@ -52,6 +53,9 @@ export function Dashboard({ gameId, onExit }: Props) {
         onResume={() => api.resumeGame(gameId).catch(() => {})}
         onExit={onExit}
       />
+
+      {/* Decision window status bar */}
+      <WindowBar window={decisionWindow} summary={summary} role={role} />
 
       {/* Tab bar */}
       <nav className="flex border-b border-border bg-surface shrink-0">
@@ -87,6 +91,8 @@ export function Dashboard({ gameId, onExit }: Props) {
             events={events}
             history={history}
             role={role}
+            gameId={gameId}
+            decisionWindow={decisionWindow}
           />
         )}
       </main>

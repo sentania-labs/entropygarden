@@ -8,8 +8,9 @@ export function GameLobby({ onSelect }: Props) {
   const [games,    setGames]    = useState<GameListItem[]>([])
   const [loading,  setLoading]  = useState(true)
   const [creating, setCreating] = useState(false)
-  const [seed,     setSeed]     = useState(42)
-  const [tickRate, setTickRate] = useState(2)
+  const [seed,        setSeed]        = useState(42)
+  const [tickRate,    setTickRate]    = useState(2)
+  const [destination, setDestination] = useState('proxima')
 
   const refresh = async () => {
     try { setGames(await api.listGames()) } catch { /* server may be starting */ }
@@ -21,7 +22,7 @@ export function GameLobby({ onSelect }: Props) {
   const handleCreate = async () => {
     setCreating(true)
     try {
-      const g = await api.createGame(seed, tickRate)
+      const g = await api.createGame(seed, tickRate, false, destination)
       onSelect(g.game_id)
     } catch { setCreating(false) }
   }
@@ -54,6 +55,18 @@ export function GameLobby({ onSelect }: Props) {
                 onChange={e => setSeed(parseInt(e.target.value) || 0)}
                 className="bg-surface-2 border border-border rounded px-2 py-1 text-text w-24 text-xs font-mono"
               />
+            </div>
+            <div className="space-y-1">
+              <label className="text-dim text-[10px] tracking-wider block">DESTINATION</label>
+              <select
+                value={destination}
+                onChange={e => setDestination(e.target.value)}
+                className="bg-surface-2 border border-border rounded px-2 py-1 text-text text-xs font-mono cursor-pointer"
+              >
+                <option value="proxima">Proxima b — 4.2 ly (Sprint)</option>
+                <option value="tau_ceti">Tau Ceti e — 11.9 ly (Standard)</option>
+                <option value="trappist">TRAPPIST-1e — 39.6 ly (Marathon)</option>
+              </select>
             </div>
             <div className="space-y-1">
               <label className="text-dim text-[10px] tracking-wider block">TICK RATE</label>

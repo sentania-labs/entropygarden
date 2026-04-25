@@ -1,4 +1,5 @@
-import type { EventRecord, GameSummary, HistoryPoint, Role } from '../types'
+import type { DecisionWindow, EventRecord, GameSummary, HistoryPoint, Role } from '../types'
+import { ActionPanel } from './ActionPanel'
 import { EventFeed } from './EventFeed'
 import { ResourceBar } from './ResourceBar'
 import { SignalPanel } from './SignalPanel'
@@ -11,9 +12,11 @@ interface Props {
   events: EventRecord[]
   history: HistoryPoint[]
   role: Role
+  gameId?: string
+  decisionWindow?: DecisionWindow | null
 }
 
-export function RingView({ ringId, summary, events, history, role }: Props) {
+export function RingView({ ringId, summary, events, history, role, gameId, decisionWindow }: Props) {
   const ring = summary.rings[ringId]
   if (!ring) return <div className="p-4 text-dim text-sm">Ring data unavailable.</div>
 
@@ -30,7 +33,7 @@ export function RingView({ ringId, summary, events, history, role }: Props) {
       {/* Ring header */}
       <div className="flex flex-wrap items-end gap-6 border-b border-border pb-4">
         <div>
-          <div className="text-dim text-[10px] tracking-widest mb-1">POPULATION</div>
+          <div className="text-dim text-[10px] tracking-widest mb-1">SETTLERS</div>
           <div className="text-amber text-2xl font-semibold tabular-nums">{ring.population}</div>
         </div>
         <div>
@@ -94,6 +97,19 @@ export function RingView({ ringId, summary, events, history, role }: Props) {
           <SignalPanel events={events} ringId={ringId} history={history} role={role} />
         </div>
       </div>
+
+      {/* Action panel — only when a decision window is open */}
+      {gameId && decisionWindow && decisionWindow.status === 'open' && (
+        <div>
+          <div className="text-dim text-[10px] tracking-widest mb-3">ORDERS</div>
+          <ActionPanel
+            window={decisionWindow}
+            gameId={gameId}
+            ringId={ringId}
+            role={role}
+          />
+        </div>
+      )}
 
       {/* Ring events */}
       <div>

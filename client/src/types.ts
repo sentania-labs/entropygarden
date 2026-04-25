@@ -15,6 +15,18 @@ export type RingSummary = {
   }
 }
 
+export type JourneySummary = {
+  destination: string
+  total_distance_ly: number
+  distance_remaining_ly: number
+  progress_pct: number
+  fuel_pct: number
+  fuel_efficiency: number
+  next_milestone: string | null
+  eta_ticks: number | null
+  arrival_tick: number | null
+}
+
 export type GameSummary = {
   game_id: string
   seed: number
@@ -24,6 +36,7 @@ export type GameSummary = {
   tick_rate: number
   paused: boolean
   rings: Record<string, RingSummary>
+  journey: JourneySummary | null
 }
 
 export type GameListItem = {
@@ -64,3 +77,41 @@ export type HistoryPoint = {
 export type Role = 'captain' | 'engineer' | 'ecologist' | 'governor' | 'ring_delegate'
 
 export type Tab = 'ship' | 'ring_1' | 'ring_2' | 'ring_3'
+
+// Decision windows
+
+export type DecisionWindow = {
+  window_id: string
+  opened_tick: number
+  closes_tick: number
+  status: 'open' | 'closed'
+  submitted: string[]
+}
+
+// Actions
+
+export type ActionType =
+  | 'emergency_repair'
+  | 'prioritize_maintenance'
+  | 'divert_power'
+  | 'ration_resource'
+  | 'boost_production'
+  | 'transfer_resource'
+  | 'impose_lockdown'
+  | 'impose_civil_restriction'
+  | 'impose_labor_draft'
+  | 'lift_restriction'
+
+export type ActionRequest = {
+  role: string
+  action_type: ActionType
+  ring_id: string
+  parameters: Record<string, unknown>
+}
+
+export type ActionResponse = {
+  action_id: string
+  status: 'accepted' | 'rejected'
+  detail: string
+  applied_tick: number
+}

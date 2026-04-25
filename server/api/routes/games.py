@@ -39,6 +39,7 @@ class CreateGameRequest(BaseModel):
     tick_rate: float = 1.0
     paused: bool = False
     decision_window_interval: int = 100
+    destination: str = "proxima"  # proxima | tau_ceti | trappist
 
 
 class AdvanceRequest(BaseModel):
@@ -57,6 +58,7 @@ async def create_game(body: CreateGameRequest, store: StoreDep) -> GameSummary:
         tick_rate=body.tick_rate,
         paused=body.paused,
         decision_window_interval=body.decision_window_interval,
+        destination=body.destination,
     )
     summary = store.get_summary(state.game_id)
     assert summary is not None

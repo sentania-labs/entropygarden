@@ -146,11 +146,12 @@ class GameStore:
         tick_rate: float = 1.0,
         paused: bool = False,
         decision_window_interval: int = 100,
+        destination: str = "proxima",
     ) -> GameState:
         """Build initial state, persist it, and start (or not) the tick loop."""
         loop = asyncio.get_running_loop()
         state: GameState = await loop.run_in_executor(
-            None, build_initial_state, seed, self._cfg
+            None, build_initial_state, seed, self._cfg, destination
         )
         if decision_window_interval != 100:
             state = state.model_copy(update={"decision_window_interval": decision_window_interval})

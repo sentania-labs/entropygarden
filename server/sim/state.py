@@ -53,6 +53,8 @@ class Person(BaseModel):
     ring_id: str
     traits: list[Trait] = Field(default_factory=list)   # 0–3 traits; mutable
     parent_ids: tuple[str, str] | None = None           # None for founding gen
+    work_ring_id: str | None = None                     # cross-ring labor; None = works in home ring
+    migration_cooldown: int = 0                         # ticks until can consider moving
 
 
 # ---------------------------------------------------------------------------
@@ -74,11 +76,18 @@ class HiddenPressures(BaseModel):
     social_tension: float = Field(ge=0.0, le=1.0)
 
 
+class RingRestrictions(BaseModel):
+    lockdown: bool = False              # Captain: no movement in or out
+    civil_restriction: bool = False     # Governor/Delegate: discourage inflow
+    labor_draft: bool = False           # Captain: productive workers can't leave
+
+
 class RingState(BaseModel):
     ring_id: str
     population: list[Person]
     resources: ResourcePool
     pressures: HiddenPressures
+    restrictions: RingRestrictions = Field(default_factory=RingRestrictions)
 
 
 # ---------------------------------------------------------------------------
@@ -103,9 +112,14 @@ class EventRecord(BaseModel):
 class ActionType(str, Enum):
     PRIORITIZE_MAINTENANCE = "prioritize_maintenance"  # redirect engineer effort to one ring
     EMERGENCY_REPAIR = "emergency_repair"              # one-shot: -0.05 debt, costs 5 power
-    DIVERT_POWER = "divert_power"                      # transfer power between rings
+    DIVERT_POWER = "divert_power"                      # transfer power between rings (legacy alias)
     RATION_RESOURCE = "ration_resource"                # -20% consumption for 30 ticks
     BOOST_PRODUCTION = "boost_production"              # +20% production for 30 ticks
+    TRANSFER_RESOURCE = "transfer_resource"            # transfer any resource between rings (with waste)
+    IMPOSE_LOCKDOWN = "impose_lockdown"                # Captain: block all movement in/out
+    IMPOSE_CIVIL_RESTRICTION = "impose_civil_restriction"  # Governor/Delegate: block inflow
+    IMPOSE_LABOR_DRAFT = "impose_labor_draft"           # Captain: productive workers can't leave
+    LIFT_RESTRICTION = "lift_restriction"               # lift any restriction on target ring
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +191,32 @@ class ActiveModifier(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Journey
+# ---------------------------------------------------------------------------
+
+
+class Milestone(BaseModel):
+    milestone_id: str
+    name: str                              # "Oort Cloud Exit", "Halfway Point"
+    distance_ly: float                     # distance from ORIGIN where this triggers
+    description: str
+    effects: dict[str, float] = Field(default_factory=dict)
+
+
+class JourneyState(BaseModel):
+    destination: str                       # "Proxima b", "Tau Ceti e", "TRAPPIST-1e"
+    total_distance_ly: float
+    distance_remaining_ly: float
+    base_speed: float                      # ly per tick at perfect efficiency
+    fuel: float = Field(ge=0.0)            # 0..fuel_capacity
+    fuel_capacity: float
+    fuel_efficiency: float = Field(ge=0.0, le=1.0)  # degrades with maintenance_debt
+    milestones: list[Milestone] = Field(default_factory=list)
+    milestones_reached: list[str] = Field(default_factory=list)
+    arrival_tick: int | None = None
+
+
+# ---------------------------------------------------------------------------
 # Top-level game state
 # ---------------------------------------------------------------------------
 
@@ -194,6 +234,7 @@ class GameState(BaseModel):
     current_window: DecisionWindow | None = None
     policies: dict[str, Policy] = Field(default_factory=dict)       # role → Policy
     window_history: list[DecisionWindow] = Field(default_factory=list)
+    journey: JourneyState | None = None
 
     @property
     def year(self) -> float:
@@ -219,10 +260,11 @@ class SimConfig:
     power_per_ring: float = 0.5           # units/ring/day (systems overhead)
 
     # Resource production per worker per tick (at base productivity)
-    food_per_farmer: float = 0.008
-    oxygen_per_life_support: float = 0.012
-    water_per_life_support: float = 0.010
-    power_per_laborer: float = 0.002      # laborers contribute a little power
+    # Tuned for ~10% surplus at default staffing (333/ring, 28% farmers, 15% life_support, 25% laborers)
+    food_per_farmer: float = 0.012        # was 0.008 — too low, food in freefall from tick 1
+    oxygen_per_life_support: float = 0.030  # was 0.012 — oxygen depleted in ~480 ticks
+    water_per_life_support: float = 0.036   # was 0.010 — water depleted in ~300 ticks
+    power_per_laborer: float = 0.009      # was 0.002 — power deeply negative at baseline
 
     # Health
     health_decay_per_tick: float = 0.0001     # slow baseline aging/wear
@@ -273,11 +315,34 @@ class SimConfig:
 
     # Initial state
     initial_pop_per_ring: int = 333
-    initial_resource_fill: float = 0.70     # fraction of capacity
+    initial_resource_fill: float = 1.0      # ship launches at full capacity
     resource_capacity: float = 500.0        # max units per resource per ring
     initial_maintenance_debt: float = 0.05
     initial_ecological_drift: float = 0.02
     initial_social_tension: float = 0.01
+
+    # Migration
+    migration_eval_fraction: float = 0.05       # fraction of pop evaluated per tick
+    migration_pressure_threshold: float = 0.8   # pressure to consider moving
+    cross_ring_work_threshold: float = 0.4      # pressure to consider working elsewhere
+    cross_ring_work_efficiency: float = 0.8     # productivity multiplier for commuters
+    migration_cooldown_ticks: int = 180         # ~6 months before reconsidering
+    lockdown_morale_penalty: float = 0.002      # per-tick morale drain
+    civil_restriction_morale_penalty: float = 0.001
+    labor_draft_morale_penalty: float = 0.0015
+
+    # Resource transfer waste (fraction lost in transit)
+    transfer_waste: dict[str, float] = field(default_factory=lambda: {
+        "power": 0.05,    # 5% transmission loss
+        "food": 0.10,     # 10% spoilage
+        "water": 0.05,    # 5% pipe loss
+        "oxygen": 0.15,   # 15% venting loss (hardest to move)
+    })
+
+    # Journey / propulsion
+    propulsion_power_drain: float = 0.3   # power drained per ring per tick for propulsion
+    base_fuel_per_tick: float = 0.01      # fuel consumed per tick at perfect efficiency
+    viable_population_minimum: int = 50   # below this, arrival is pyrrhic
 
     # Occupation distribution (fractions, must sum to ~1.0)
     occupation_weights: dict[str, float] = field(default_factory=lambda: {

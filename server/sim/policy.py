@@ -14,7 +14,9 @@ ALL_ROLES: list[str] = [
     "engineer",
     "ecologist",
     "governor",
-    "ring_delegate",
+    "ring_1_delegate",
+    "ring_2_delegate",
+    "ring_3_delegate",
 ]
 
 

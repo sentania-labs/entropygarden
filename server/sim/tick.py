@@ -24,6 +24,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from sim.events import EventDef, evaluate_events
+from sim.journey import process_journey
+from sim.migration import apply_restriction_morale, process_migration
 from sim.population import age_person, apply_medic_heal, apply_starvation, is_dead, reproduce, update_morale
 from sim.pressures import accumulate_pressures
 from sim.prng import tick_rng
@@ -35,6 +37,7 @@ from sim.state import (
     Occupation,
     Person,
     ResourcePool,
+    RingRestrictions,
     RingState,
     SimConfig,
 )
@@ -52,17 +55,35 @@ def tick(
     # 0. Apply pending actions (one-shot effects + create modifiers), expire old modifiers
     state = _apply_pending_actions(state, cfg)
 
+    # Build cross-ring worker lookup: ring_id -> list of workers from other rings
+    cross_ring_workers: dict[str, list[Person]] = {rid: [] for rid in state.rings}
+    for ring_id, ring in state.rings.items():
+        for p in ring.population:
+            if p.work_ring_id and p.work_ring_id != ring_id and p.work_ring_id in cross_ring_workers:
+                cross_ring_workers[p.work_ring_id].append(p)
+
     new_rings: dict[str, RingState] = {}
     new_person_counter = state.tick  # use tick as part of unique ID for new births
 
     for ring_id, ring in state.rings.items():
         ring_mods = [m for m in state.active_modifiers if m.ring_id == ring_id]
         ring, new_person_counter = _tick_ring(
-            ring, state.seed, state.tick, cfg, new_person_counter, ring_mods
+            ring, state.seed, state.tick, cfg, new_person_counter, ring_mods,
+            cross_ring_workers=cross_ring_workers.get(ring_id, []),
         )
         new_rings[ring_id] = ring
 
     mid_state = state.model_copy(update={"rings": new_rings, "tick": state.tick + 1})
+
+    # 11a. Migration (autonomous settler movement between rings)
+    migration_rng = tick_rng(state.seed, state.tick, "migration", "ship")
+    mid_state = process_migration(mid_state, cfg, migration_rng)
+
+    # 11a2. Restriction morale penalties
+    mid_state = apply_restriction_morale(mid_state, cfg)
+
+    # 11b. Journey processing (fuel, distance, milestones, propulsion power drain)
+    mid_state = process_journey(mid_state, cfg)
 
     # 12. Event evaluation (ship-level, after all rings are updated)
     if event_defs:
@@ -100,21 +121,32 @@ def _apply_pending_actions(state: GameState, cfg: SimConfig) -> GameState:
                 }),
             })
 
-        elif action.action_type == ActionType.DIVERT_POWER:
+        elif action.action_type in (ActionType.DIVERT_POWER, ActionType.TRANSFER_RESOURCE):
+            # Unified resource transfer with waste factor
+            resource = str(action.parameters.get("resource", "power"))
+            if action.action_type == ActionType.DIVERT_POWER:
+                resource = "power"  # legacy alias always transfers power
             target_id = str(action.parameters.get("target_ring", ""))
             amount = float(action.parameters.get("amount", 10.0))
             target = rings.get(target_id)
-            if target is None:
+            if target is None or resource not in ("food", "water", "oxygen", "power"):
                 continue
             r_src = ring.resources
-            actual = min(amount, r_src.power)
+            src_val = getattr(r_src, resource)
+            actual = min(amount, src_val)
+            waste = cfg.transfer_waste.get(resource, 0.0)
+            delivered = actual * (1.0 - waste)
+            # Update source
             rings[action.ring_id] = ring.model_copy(update={
-                "resources": r_src.model_copy(update={"power": r_src.power - actual}),
+                "resources": r_src.model_copy(update={resource: src_val - actual}),
             })
+            # Update target
+            ring = rings[action.ring_id]  # refresh ref
             r_tgt = target.resources
+            tgt_val = getattr(r_tgt, resource)
             rings[target_id] = target.model_copy(update={
                 "resources": r_tgt.model_copy(update={
-                    "power": min(cfg.resource_capacity, r_tgt.power + actual),
+                    resource: min(cfg.resource_capacity, tgt_val + delivered),
                 }),
             })
 
@@ -145,6 +177,29 @@ def _apply_pending_actions(state: GameState, cfg: SimConfig) -> GameState:
                 expires_tick=state.tick + 30,
             ))
 
+        elif action.action_type == ActionType.IMPOSE_LOCKDOWN:
+            restr = ring.restrictions
+            rings[action.ring_id] = ring.model_copy(update={
+                "restrictions": restr.model_copy(update={"lockdown": True}),
+            })
+
+        elif action.action_type == ActionType.IMPOSE_CIVIL_RESTRICTION:
+            restr = ring.restrictions
+            rings[action.ring_id] = ring.model_copy(update={
+                "restrictions": restr.model_copy(update={"civil_restriction": True}),
+            })
+
+        elif action.action_type == ActionType.IMPOSE_LABOR_DRAFT:
+            restr = ring.restrictions
+            rings[action.ring_id] = ring.model_copy(update={
+                "restrictions": restr.model_copy(update={"labor_draft": True}),
+            })
+
+        elif action.action_type == ActionType.LIFT_RESTRICTION:
+            rings[action.ring_id] = ring.model_copy(update={
+                "restrictions": RingRestrictions(),  # clear all
+            })
+
     kept_mods = [m for m in state.active_modifiers if m.expires_tick > state.tick]
     return state.model_copy(update={
         "rings": rings,
@@ -160,6 +215,7 @@ def _tick_ring(
     cfg: SimConfig,
     person_counter: int,
     modifiers: list[ActiveModifier] | None = None,
+    cross_ring_workers: list[Person] | None = None,
 ) -> tuple[RingState, int]:
     population = list(ring.population)
     ring_id = ring.ring_id
@@ -183,8 +239,11 @@ def _tick_ring(
         elif mod.action_type == ActionType.BOOST_PRODUCTION:
             production_mult *= 1.2
 
+    # Residents consume; local workers + cross-ring commuters produce
+    # Local workers = residents who work here (work_ring_id is None or matches this ring)
+    local_workers = [p for p in population if p.work_ring_id is None or p.work_ring_id == ring_id]
     consumed = consumption_for_ring(population, cfg)
-    produced = production_for_ring(population, cfg)
+    produced = production_for_ring(local_workers, cfg, cross_ring_workers=cross_ring_workers)
 
     if consumption_mult != 1.0:
         consumed = {k: v * consumption_mult for k, v in consumed.items()}
@@ -265,6 +324,7 @@ def _tick_ring(
         population=final_population,
         resources=new_resources,
         pressures=new_pressures,
+        restrictions=ring.restrictions,
     )
     return new_ring, person_counter
 

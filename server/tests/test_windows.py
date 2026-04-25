@@ -104,7 +104,7 @@ class TestConflictResolution:
     def test_engineer_overrides_ring_delegate_same_ring(self) -> None:
         w = open_window(opened_tick=0, interval=10)
         engineer_action = _make_action("engineer", ring_id="ring_2")
-        delegate_action = _make_action("ring_delegate", ring_id="ring_2")
+        delegate_action = _make_action("ring_2_delegate", ring_id="ring_2")
 
         closed, accepted = resolve_window(w, [engineer_action, delegate_action])
 
@@ -126,13 +126,13 @@ class TestConflictResolution:
 
     def test_unknown_role_treated_as_lowest_authority(self) -> None:
         w = open_window(opened_tick=0, interval=10)
-        ring_delegate_action = _make_action("ring_delegate", ring_id="ring_1")
+        ring_delegate_action = _make_action("ring_1_delegate", ring_id="ring_1")
         unknown_action = _make_action("unknown_role", ring_id="ring_1")
 
         closed, accepted = resolve_window(w, [ring_delegate_action, unknown_action])
 
         assert len(accepted) == 1
-        assert accepted[0].role == "ring_delegate"
+        assert accepted[0].role == "ring_1_delegate"
 
     def test_single_action_not_rejected(self) -> None:
         w = open_window(opened_tick=0, interval=10)
@@ -156,10 +156,10 @@ class TestConflictResolution:
 class TestRoleHierarchy:
     def test_hierarchy_order(self) -> None:
         assert ROLE_HIERARCHY[0] == "captain"
-        assert ROLE_HIERARCHY[-1] == "ring_delegate"
+        assert ROLE_HIERARCHY[-1] == "ring_3_delegate"
 
-    def test_all_five_roles_in_hierarchy(self) -> None:
-        assert len(ROLE_HIERARCHY) == 5
+    def test_all_seven_roles_in_hierarchy(self) -> None:
+        assert len(ROLE_HIERARCHY) == 7
 
 
 # ---------------------------------------------------------------------------
