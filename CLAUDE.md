@@ -79,6 +79,14 @@ ark-drift/
 **Phase 0: Bootstrap** — Get sim engine ticking, basic state model, CLI output.
 Next: event system, then basic web client, then first AI agent.
 
+## Charter
+
+This workspace is software. The "What this is" / product
+scope above is the charter. Software authors don't touch
+infrastructure outside their charter — even with credentials
+available. For work that needs out-of-charter access, use a
+sanctioned cross-system channel.
+
 ## When In Doubt
 - Simpler is better. Tune later.
 - The sim engine owns truth. LLMs interpret it.
